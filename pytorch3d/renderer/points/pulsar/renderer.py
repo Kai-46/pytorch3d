@@ -250,6 +250,9 @@ class _Render(torch.autograd.Function):
                 "Performing a backward pass for a "
                 "rendering with `mode != 0`! This is not possible."
             )
+        # fix nans in calculated gradients
+        grad_pos[torch.isnan(grad_pos)] = 0.0
+        
         return (
             grad_pos,
             grad_col,
