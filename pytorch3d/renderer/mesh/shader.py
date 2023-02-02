@@ -30,6 +30,8 @@ from .shading import (
     phong_shading,
 )
 
+from pytorch3d.ops import interpolate_face_attributes
+
 
 # A Shader should take as input fragments from the output of rasterization
 # along with scene params and output images. A shader could perform operations
@@ -73,6 +75,77 @@ class ShaderBase(nn.Module):
         self.materials = self.materials.to(device)
         self.lights = self.lights.to(device)
         return self
+
+
+class HardNormalShader(ShaderBase):
+    """
+    Per pixel normal - use the interpolated
+    coordinates and normals for each pixel. The blending function returns the
+    soft aggregated normals using all the faces per pixel.
+
+    To use the default values, simply initialize the shader with the desired
+    device e.g.
+
+    .. code-block::
+
+        shader = SoftNormalShader(device=torch.device("cuda:0"))
+    """
+
+    def forward(self, fragments: Fragments, meshes: Meshes, **kwargs) -> torch.Tensor:
+        cameras = super()._get_cameras(**kwargs)
+        blend_params = kwargs.get("blend_params", self.blend_params)
+
+        faces = meshes.faces_packed()  # (F, 3)
+        vertex_normals = meshes.verts_normals_packed()  # (V, 3)
+        faces_normals = vertex_normals[faces]
+        ones = torch.ones_like(fragments.bary_coords)
+        pixel_normals = interpolate_face_attributes(
+            fragments.pix_to_face, ones, faces_normals
+        )
+        normal_map = hard_rgb_blend(
+            pixel_normals, fragments, blend_params
+        )
+        normal_map[..., :3] = normal_map[..., :3] / normal_map[..., :3].norm(dim=-1, keepdim=True)
+        normal_map[..., :3] = (normal_map[..., :3] + 1.) / 2.
+        normal_map[..., :3] = normal_map[..., :3] * normal_map[..., 3:4] + torch.ones_like(normal_map[..., :3]) * (1. - normal_map[..., 3:4]) 
+        return normal_map
+
+
+class SoftNormalShader(ShaderBase):
+    """
+    Per pixel normal - use the interpolated
+    coordinates and normals for each pixel. The blending function returns the
+    soft aggregated normals using all the faces per pixel.
+
+    To use the default values, simply initialize the shader with the desired
+    device e.g.
+
+    .. code-block::
+
+        shader = SoftNormalShader(device=torch.device("cuda:0"))
+    """
+
+    def forward(self, fragments: Fragments, meshes: Meshes, **kwargs) -> torch.Tensor:
+        cameras = super()._get_cameras(**kwargs)
+        blend_params = kwargs.get("blend_params", self.blend_params)
+        znear = kwargs.get("znear", getattr(cameras, "znear", 1.0))
+        zfar = kwargs.get("zfar", getattr(cameras, "zfar", 100.0))
+
+        faces = meshes.faces_packed()  # (F, 3)
+        vertex_normals = meshes.verts_normals_packed()  # (V, 3)
+        faces_normals = vertex_normals[faces]
+        ones = torch.ones_like(fragments.bary_coords)
+        pixel_normals = interpolate_face_attributes(
+            fragments.pix_to_face, ones, faces_normals
+        )
+        normal_map = softmax_rgb_blend(
+            pixel_normals, fragments, blend_params, znear=znear, zfar=zfar
+        )
+
+        normal_map[..., :3] = normal_map[..., :3] / normal_map[..., :3].norm(dim=-1, keepdim=True)
+        normal_map[..., :3] = (normal_map[..., :3] + 1.) / 2.
+        normal_map[..., :3] = normal_map[..., :3] * normal_map[..., 3:4] + torch.ones_like(normal_map[..., :3]) * (1. - normal_map[..., 3:4])
+        return normal_map
 
 
 class HardPhongShader(ShaderBase):
